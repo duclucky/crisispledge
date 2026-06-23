@@ -16,7 +16,6 @@ class Contract(gl.Contract):
     trusted_orgs: TreeMap[str, str]
 
     def __init__(self):
-        self.owner = "deployer"
         self.next_id = u256(0)
 
     def _parse_verdict(self, s: str) -> dict:
@@ -48,15 +47,17 @@ class Contract(gl.Contract):
             if idx == -1: return 0
             col = s.find(':', idx)
             if col == -1: return 0
-            st = col + 1
-            while st < len(s) and not (s[st].isdigit() or s[st] == '-'):
-                st += 1
-            if st == len(s): return 0
-            en = st
-            while en < len(s) and s[en].isdigit():
-                en += 1
+            digits = ""
+            i = col + 1
+            while i < len(s) and s[i] not in ',}':
+                ch = s[i]
+                if ch >= "0" and ch <= "9":
+                    digits += ch
+                i += 1
+            if len(digits) == 0:
+                return 0
             try:
-                return int(s[st:en])
+                return int(digits)
             except Exception:
                 return 0
 
@@ -110,15 +111,19 @@ class Contract(gl.Contract):
         if status != "OPEN":
             raise Exception("UserError: pledge already resolved")
 
-        urls_str = self.pledge_urls.get(pid, "")
-        url_list = urls_str.split("\n")
-        source_urls = [u.strip() for u in url_list if len(u.strip()) > 0]
-        criteria = self.pledge_criteria.get(pid, "")
-        relief_org = self.pledge_org.get(pid, "")
+        urls_str = str(self.pledge_urls.get(pid, ""))
+        criteria = str(self.pledge_criteria.get(pid, ""))
+        relief_org = str(self.pledge_org.get(pid, ""))
 
-        def leader_fn() -> dict:
+        source_urls = []
+        for p in urls_str.split("\n"):
+            cleaned = p.strip()
+            if len(cleaned) > 0:
+                source_urls.append(cleaned)
+
+        def leader_fn():
             if len(source_urls) == 0:
-                return {"verdict": "INSUFFICIENT", "confidence": 0, "cross_source_consistency": False, "scale_meets_threshold": False, "reason": "No sources"}
+                return {"verdict": "INSUFFICIENT", "confidence": 0, "cross_source_consistency": False, "scale_meets_threshold": False, "reason": "No sources after split"}
 
             gathered = []
             for url in source_urls:
@@ -133,51 +138,54 @@ class Contract(gl.Contract):
                 return {"verdict": "INSUFFICIENT", "confidence": 0, "cross_source_consistency": False, "scale_meets_threshold": False, "reason": "All URLs dead"}
 
             evidence = "\n\n---SOURCE---\n\n".join(gathered)
-            task = f"""
-            You are a disaster-verification juror. Donor criteria: {criteria}.
-            Using the independent sources below, decide:
-            - Did a REAL disaster matching the criteria actually occur?
-            - Do the sources AGREE (cross-consistent) or contradict?
-            - Does the scale meet the donor's threshold in the criteria?
-            - Any sign of fake, recycled, or exaggerated news?
-            Sources:
-            {evidence}
-            Respond ONLY with this exact JSON format:
-            {{
-                "verdict": "CONFIRMED",
-                "confidence": 90,
-                "cross_source_consistency": true,
-                "scale_meets_threshold": true,
-                "reason": "short text"
-            }}
-            """
-            raw = gl.nondet.exec_prompt(task)
-            if not isinstance(raw, str):
-                raw = str(raw)
-            return self._parse_verdict(raw)
+            task = (
+                "You are a disaster-verification juror. Donor criteria: " + criteria + ".\n"
+                "Using the independent sources below, decide:\n"
+                "- Did a REAL disaster matching the criteria actually occur?\n"
+                "- Do the sources AGREE (cross-consistent) or contradict?\n"
+                "- Does the scale meet the donor's threshold in the criteria?\n"
+                "- Any sign of fake, recycled, or exaggerated news?\n"
+                "Sources:\n" + evidence + "\n"
+                'Respond ONLY as JSON with keys: '
+                'verdict (one of "CONFIRMED","REJECTED","INSUFFICIENT"), '
+                "confidence (integer 0-100), "
+                "cross_source_consistency (true/false), "
+                "scale_meets_threshold (true/false), "
+                "reason (short string)."
+            )
+            response = gl.nondet.exec_prompt(task, response_format="json")
+            if isinstance(response, dict):
+                return response
+            return self._parse_verdict(str(response))
 
-        def validator_fn(leader_res) -> bool:
-            if not isinstance(leader_res, gl.vm.Return):
+        def validator_fn(leader_result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
                 return False
-            leader_parsed = leader_res.calldata
-            
-            my_parsed = leader_fn()
+            try:
+                mine = leader_fn()
+            except Exception:
+                return False
+            theirs = leader_result.calldata
+            return (
+                str(theirs.get("verdict", "")) == str(mine.get("verdict", ""))
+                and bool(theirs.get("cross_source_consistency", False))
+                == bool(mine.get("cross_source_consistency", False))
+            )
 
-            if leader_parsed.get("verdict") != my_parsed.get("verdict"):
-                return False
-            if leader_parsed.get("cross_source_consistency") != my_parsed.get("cross_source_consistency"):
-                return False
-            if leader_parsed.get("scale_meets_threshold") != my_parsed.get("scale_meets_threshold"):
-                return False
-            return True
+        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
-        parsed = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        v = str(result.get("verdict", "INSUFFICIENT"))
+        if v not in ("CONFIRMED", "REJECTED", "INSUFFICIENT"):
+            v = "INSUFFICIENT"
 
-        v = parsed.get("verdict", "INSUFFICIENT")
-        c = parsed.get("confidence", 0)
-        consist = parsed.get("cross_source_consistency", False)
-        scale = parsed.get("scale_meets_threshold", False)
-        reason = parsed.get("reason", "")
+        c = 0
+        try:
+            c = int(result.get("confidence", 0))
+        except Exception:
+            c = 0
+        consist = bool(result.get("cross_source_consistency", False))
+        scale = bool(result.get("scale_meets_threshold", False))
+        reason = str(result.get("reason", "No reason provided"))
 
         self.pledge_verdict[pid] = v
         self.pledge_reason[pid] = reason
@@ -216,6 +224,10 @@ class Contract(gl.Contract):
     @gl.public.view
     def get_reason(self, id: int) -> str:
         return self.pledge_reason.get(u256(id), "")
+
+    @gl.public.view
+    def get_urls(self, id: int) -> str:
+        return self.pledge_urls.get(u256(id), "")
 
     @gl.public.view
     def get_amount(self, id: int) -> u256:

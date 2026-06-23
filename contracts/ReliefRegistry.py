@@ -7,7 +7,7 @@ class Contract(gl.Contract):
     org_names: TreeMap[str, str]
 
     def __init__(self):
-        self.owner = "deployer"
+        pass
 
     def _parse_legit(self, s: str) -> dict:
         res = {
@@ -47,45 +47,43 @@ class Contract(gl.Contract):
 
     @gl.public.write
     def register_org(self, org: str, name: str, verification_url: str) -> str:
-        def leader_fn() -> dict:
+        v_url = str(verification_url)
+        o_name = str(name)
+
+        def leader_fn():
             try:
-                page = gl.nondet.web.render(verification_url, mode="text")
+                page = gl.nondet.web.render(v_url, mode="text")
                 if not page or len(page.strip()) == 0:
                     return {"legit": False, "reason": "URL dead"}
             except Exception:
                 return {"legit": False, "reason": "URL error"}
 
-            task = f"""
-            You are verifying a relief organization.
-            Organization claimed name: {name}
-            Website Content:
-            {page}
+            task = (
+                "You are verifying a relief organization.\n"
+                "Organization claimed name: " + o_name + "\n"
+                "Website Content:\n" + page + "\n"
+                "Does this look like a legitimate relief/charity organization?\n"
+                'Respond ONLY as JSON with keys: legit (true/false), reason (short string).'
+            )
+            response = gl.nondet.exec_prompt(task, response_format="json")
+            if isinstance(response, dict):
+                return response
+            return self._parse_legit(str(response))
 
-            Does this look like a legitimate relief/charity organization?
-            Respond ONLY with this exact JSON format:
-            {{
-                "legit": true,
-                "reason": "short explanation"
-            }}
-            """
-            raw = gl.nondet.exec_prompt(task)
-            if not isinstance(raw, str):
-                raw = str(raw)
-            return self._parse_legit(raw)
-
-        def validator_fn(leader_res) -> bool:
-            if not isinstance(leader_res, gl.vm.Return):
+        def validator_fn(leader_result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
                 return False
-            leader_parsed = leader_res.calldata
-            
-            my_parsed = leader_fn()
+            try:
+                mine = leader_fn()
+            except Exception:
+                return False
+            theirs = leader_result.calldata
+            return bool(theirs.get("legit", False)) == bool(mine.get("legit", False))
 
-            return leader_parsed.get("legit") == my_parsed.get("legit")
+        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        is_legit = bool(result.get("legit", False))
 
-        parsed = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        is_legit = parsed.get("legit", False)
-
-        self.org_names[org] = name
+        self.org_names[org] = o_name
         self.org_trust[org] = "true" if is_legit else "false"
 
         return "true" if is_legit else "false"
