@@ -4,8 +4,8 @@
 
 > Why this dies without GenLayer: judging whether a delivered work product truly meets agreed terms is a subjective, evidence based decision that reads the open web and that no single party should control. Solidity cannot read a URL or reason over unstructured deliverables. GenLayer's AI validators can, and they agree on the meaning of the verdict through consensus.
 
-Live app: https://crisispledge.vercel.app/
-Repository: https://github.com/duclucky/crisispledge
+Live app: https://trustlessagent.vercel.app
+Repository: https://github.com/duclucky/trustlessagent
 
 ## 1. The problem
 
